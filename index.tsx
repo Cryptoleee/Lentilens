@@ -12,7 +12,7 @@ const extractFrames = async (
   videoFile: File,
   frameCount: number = 45,
   onProgress?: (percent: number) => void
-): Promise<string[]> => {
+): Promise<{ frames: string[], width: number, height: number }> => {
   return new Promise((resolve, reject) => {
     const video = document.createElement("video");
     const canvas = document.createElement("canvas");
@@ -104,8 +104,10 @@ const extractFrames = async (
           }
         }
         
+        const finalWidth = canvas.width;
+        const finalHeight = canvas.height;
         cleanup();
-        resolve(frames);
+        resolve({ frames, width: finalWidth, height: finalHeight });
       } catch (err) {
         cleanup();
         reject(err);
@@ -130,74 +132,111 @@ const fragmentShader = `
 uniform sampler2D uTexture;
 uniform float uTilt; // -1.0 to 1.0
 uniform vec2 uResolution;
+uniform vec2 uImageResolution;
 
 varying vec2 vUv;
+
+// Function to compute correct UVs for "background-size: cover"
+// Preserves aspect ratio and centers the image
+vec2 getCoverUV(vec2 uv, vec2 resolution, vec2 texResolution) {
+    float screenAspect = resolution.x / resolution.y;
+    float texAspect = texResolution.x / texResolution.y;
+    
+    vec2 scale = vec2(1.0);
+    
+    // Correct logic for "Cover":
+    // If Screen is wider (Aspect >), we match width and crop height.
+    // To crop height, we need to map 0..1 ScreenY to a smaller range of TextureY.
+    // So scale factor must be < 1.0.
+    
+    if (screenAspect > texAspect) {
+        scale.y = texAspect / screenAspect; 
+    } else {
+        scale.x = screenAspect / texAspect;
+    }
+    
+    // Scale from center
+    return (uv - 0.5) * scale + 0.5;
+}
 
 void main() {
   vec2 uv = vUv;
   
-  // --- 1. Barrel Distortion ---
-  // Warps UVs to create that curved lens look
-  vec2 centered = uv - 0.5;
-  float distSq = dot(centered, centered);
-  float distortionStrength = 0.15;
-  vec2 distortedUV = uv + centered * (distortionStrength * distSq);
+  // 1. Aspect Ratio Correction (Cover Mode)
+  vec2 coverUV = getCoverUV(uv, uResolution, uImageResolution);
+  
+  // Safety clamp to avoid streak artifacts if precision drifts
+  coverUV = clamp(coverUV, 0.001, 0.999);
 
-  // If we distort out of bounds, make it black
-  if (distortedUV.x < 0.0 || distortedUV.x > 1.0 || distortedUV.y < 0.0 || distortedUV.y > 1.0) {
-      gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-      return;
-  }
+  // 2. Physical Lenticular Geometry
+  // Simulation of vertical cylinder array
+  float density = 60.0; 
+  // Add aspect ratio compensation to density so ridges are square
+  float ridges = uv.x * density * (uResolution.x / uResolution.y);
+  
+  // Local X (-1.0 to 1.0) within a single lens
+  float localX = fract(ridges) * 2.0 - 1.0;
+  
+  // Calculate Cylinder Normal
+  // A perfect semi-cylinder profile: z = sqrt(1 - x^2)
+  float localZ = sqrt(max(0.0, 1.0 - localX * localX));
+  vec3 normal = normalize(vec3(localX, 0.0, localZ));
+  
+  // 3. Refraction (The "Deep Glass" look)
+  // We offset the texture lookup based on the normal XY
+  float ior = 0.04; // Refraction strength
+  vec2 refraction = normal.xy * ior;
+  
+  // Parallax: The view angle (uTilt) also shifts what we see
+  refraction.x -= uTilt * 0.08;
+  
+  vec2 finalUV = coverUV + refraction;
 
-  // --- 2. Lenticular Ridges (The Moiré Source) ---
-  // Create high-frequency vertical sine waves
-  // We curve the phase of the wave based on Y to match the barrel distortion
-  float curveCof = 0.2; 
-  float curve = (uv.y - 0.5) * (uv.y - 0.5) * curveCof;
-  
-  float frequency = 100.0; 
-  float ridgePhase = (uv.x - 0.5 + curve) * frequency;
-  
-  // The ridge profile (0.0 to 1.0)
-  float ridge = 0.5 + 0.5 * sin(ridgePhase * 6.28);
-  
-  // --- 3. Refraction ---
-  // Offset the texture lookup based on the ridge normal
-  // This is what makes the image "shift" under the plastic
-  float refractionAmt = 0.005;
-  vec2 texUV = distortedUV;
-  texUV.x += (ridge - 0.5) * refractionAmt;
-  
-  // Sample texture
-  vec4 texColor = texture2D(uTexture, texUV);
-  
-  // --- 4. Lighting & Specular ---
-  // Simulate light hitting the ridges.
-  // The light position moves as we tilt the device (uTilt)
-  
-  float tiltOffset = uTilt * 2.5; // Amplify tilt for lighting
-  
-  // Specular highlight: When the ridge normal aligns with light direction
-  // We approximate this by checking the phase against the tilt
-  float lightPhase = ridgePhase + tiltOffset;
-  float specular = pow(max(0.0, sin(lightPhase * 6.28)), 8.0);
-  
-  // Shadow/Occlusion in the valleys
-  float occlusion = 0.8 + 0.2 * ridge;
-  
-  // --- 5. Composite ---
-  vec3 finalColor = texColor.rgb * occlusion;
-  
-  // Add the plastic shine (white)
-  finalColor += vec3(1.0) * specular * 0.25;
-  
-  // Add a subtle scanline interference for extra texture
-  float interference = sin(uv.y * 300.0);
-  finalColor *= (0.97 + 0.03 * interference);
+  // 4. Chromatic Aberration
+  // Split RGB slightly based on lens edge power
+  float abb = 0.004 * abs(localX);
+  float r = texture2D(uTexture, finalUV + vec2(abb, 0.0)).r;
+  float g = texture2D(uTexture, finalUV).g;
+  float b = texture2D(uTexture, finalUV - vec2(abb, 0.0)).b;
+  vec3 texColor = vec3(r, g, b);
 
-  // Deep Vignette
-  float vignette = 1.0 - smoothstep(0.4, 0.9, length(uv - 0.5));
-  finalColor *= vignette;
+  // 5. Studio Lighting (Reflection)
+  // Create a sharp, glossy reflection that moves with tilt
+  // Light moves opposite to tilt
+  vec3 lightDir = normalize(vec3(uTilt * -1.5, 0.2, 0.8));
+  vec3 viewDir = vec3(0.0, 0.0, 1.0);
+  vec3 halfVector = normalize(lightDir + viewDir);
+  
+  // Blinn-Phong Specular
+  float NdotH = max(0.0, dot(normal, halfVector));
+  float specular = pow(NdotH, 40.0); // High sharpness for plastic/glass look
+  
+  // Anisotropic Strip Light (like a studio softbox reflecting)
+  // We stretch the highlight vertically
+  float stripSpec = pow(max(0.0, dot(normal, normalize(vec3(uTilt * -1.5, 0.0, 0.5)))), 20.0);
+  
+  // Fresnel (Edge Glow)
+  // Glass looks brighter/more reflective at glancing angles (edges of the cylinder)
+  float fresnel = pow(1.0 - normal.z, 3.0);
+  
+  // 6. Occlusion
+  // Darken the deep valleys between lenses
+  float occlusion = smoothstep(-1.0, -0.5, -abs(localX));
+  
+  // 7. Composite
+  vec3 finalColor = texColor;
+  
+  // Apply occlusion to base texture
+  finalColor *= (0.7 + 0.3 * occlusion);
+  
+  // Add lighting
+  finalColor += vec3(1.0) * specular * 0.6; // Sharp point highlight
+  finalColor += vec3(0.9, 0.95, 1.0) * stripSpec * 0.4; // Soft strip reflection
+  finalColor += vec3(1.0) * fresnel * 0.2; // Edge glow
+
+  // Vignette
+  float vig = 1.0 - smoothstep(0.5, 1.4, length(vUv - 0.5));
+  finalColor *= vig;
 
   gl_FragColor = vec4(finalColor, 1.0);
 }
@@ -205,9 +244,13 @@ void main() {
 
 const LenticularViewer = ({ 
   frames, 
+  width, 
+  height,
   onClose 
 }: { 
   frames: string[], 
+  width: number, 
+  height: number,
   onClose: () => void 
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -221,15 +264,15 @@ const LenticularViewer = ({
     if (!frames.length) return;
     
     const loader = new THREE.TextureLoader();
-    // Clear old textures
     texturesRef.current.forEach(t => t.dispose());
     texturesRef.current = [];
 
-    // Load all textures
     Promise.all(frames.map(src => new Promise<THREE.Texture>((resolve) => {
       loader.load(src, (tex) => {
         tex.minFilter = THREE.LinearFilter;
         tex.magFilter = THREE.LinearFilter;
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
         resolve(tex);
       });
     }))).then(loadedTextures => {
@@ -245,7 +288,6 @@ const LenticularViewer = ({
   useEffect(() => {
     if (!containerRef.current) return;
 
-    // Scene setup
     const scene = new THREE.Scene();
     const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
@@ -254,24 +296,24 @@ const LenticularViewer = ({
       if (!containerRef.current) return;
       const { clientWidth, clientHeight } = containerRef.current;
       renderer.setSize(clientWidth, clientHeight);
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Cap pixel ratio for performance
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      
       if (materialRef.current) {
         materialRef.current.uniforms.uResolution.value.set(clientWidth, clientHeight);
       }
     };
     
     containerRef.current.appendChild(renderer.domElement);
-    updateSize();
-
-    // Plane
+    
     const geometry = new THREE.PlaneGeometry(2, 2);
     const material = new THREE.ShaderMaterial({
       vertexShader,
       fragmentShader,
       uniforms: {
-        uTexture: { value: null }, // Will be set in animation loop
+        uTexture: { value: null },
         uTilt: { value: 0 },
-        uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) }
+        uResolution: { value: new THREE.Vector2(1, 1) },
+        uImageResolution: { value: new THREE.Vector2(width, height) }
       }
     });
     materialRef.current = material;
@@ -279,21 +321,16 @@ const LenticularViewer = ({
     const plane = new THREE.Mesh(geometry, material);
     scene.add(plane);
 
-    // Resize handler
+    updateSize();
     window.addEventListener('resize', updateSize);
 
-    // Animation Loop
     const animate = () => {
       if (!texturesRef.current.length) {
          requestRef.current = requestAnimationFrame(animate);
          return;
       }
 
-      // 1. Determine current frame based on tilt
-      // tiltRef is updated by event listeners
       const t = tiltRef.current; // -1 to 1
-      
-      // Map tilt (-1 to 1) to frame index (0 to length-1)
       const normTilt = (t + 1) / 2; 
       const frameIndex = Math.min(
         texturesRef.current.length - 1,
@@ -305,9 +342,10 @@ const LenticularViewer = ({
       if (materialRef.current) {
         materialRef.current.uniforms.uTexture.value = currentTexture;
         
-        // Smooth tilt damping for lighting visual only, or use raw for responsiveness?
-        // Using raw tilt for the lighting uniform makes it feel snappier.
-        materialRef.current.uniforms.uTilt.value = t;
+        // Interpolate tilt for smooth lighting
+        const currentTiltUniform = materialRef.current.uniforms.uTilt.value;
+        const lerpFactor = 0.15;
+        materialRef.current.uniforms.uTilt.value += (t - currentTiltUniform) * lerpFactor;
       }
 
       renderer.render(scene, camera);
@@ -326,21 +364,17 @@ const LenticularViewer = ({
         containerRef.current.removeChild(renderer.domElement);
       }
     };
-  }, []);
+  }, [width, height]); 
 
-  // Event Listeners for Tilt/Mouse
   useEffect(() => {
     const handleOrientation = (e: DeviceOrientationEvent) => {
-      const gamma = e.gamma || 0; // Left/Right tilt (-90 to 90)
-      const maxTilt = 30; // Degrees needed for full sweep
-      
-      // Clamp and normalize to -1 ... 1
+      const gamma = e.gamma || 0; 
+      const maxTilt = 40; 
       let val = Math.max(-maxTilt, Math.min(maxTilt, gamma));
       tiltRef.current = val / maxTilt;
     };
 
     const handleMouseMove = (e: MouseEvent) => {
-      // Map X position to -1 ... 1
       const x = e.clientX / window.innerWidth;
       tiltRef.current = (x * 2) - 1; 
     };
@@ -355,16 +389,14 @@ const LenticularViewer = ({
   }, []);
 
   return (
-    <div className="fixed inset-0 z-50 bg-black">
+    <div className="fixed inset-0 z-50 bg-black touch-none">
       <div ref={containerRef} className="w-full h-full" />
-      
-      {/* Minimal Close Button */}
       <button 
         onClick={onClose}
-        className="absolute top-6 right-6 z-50 w-10 h-10 flex items-center justify-center bg-transparent opacity-50 hover:opacity-100 transition-opacity"
+        className="absolute top-8 right-8 z-50 w-12 h-12 flex items-center justify-center bg-black/20 backdrop-blur-md rounded-full border border-white/10 hover:bg-white/20 transition-all cursor-pointer"
         aria-label="Close"
       >
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <line x1="18" y1="6" x2="6" y2="18"></line>
             <line x1="6" y1="6" x2="18" y2="18"></line>
         </svg>
@@ -373,12 +405,7 @@ const LenticularViewer = ({
   );
 };
 
-
 // --- Main App ---
-
-const Separator = () => (
-  <div className="w-full h-px bg-white/20 my-4" />
-);
 
 const DataLabel = ({ label, value }: { label: string, value: string }) => (
   <div className="flex flex-col gap-1">
@@ -403,12 +430,11 @@ const Clock = () => {
 
 const App = () => {
   const [frames, setFrames] = useState<string[]>([]);
+  const [videoDims, setVideoDims] = useState<{width: number, height: number} | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [viewMode, setViewMode] = useState(false);
   const [permissionGranted, setPermissionGranted] = useState(false);
-
-  // --- Handlers ---
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -417,17 +443,17 @@ const App = () => {
     setIsProcessing(true);
     setProgress(0);
     setFrames([]);
+    setVideoDims(null);
 
     try {
-      // Pass the progress updater directly to the extractor
-      const extracted = await extractFrames(file, 45, (percent) => {
+      const result = await extractFrames(file, 45, (percent) => {
         setProgress(percent);
       });
       
-      setFrames(extracted);
+      setFrames(result.frames);
+      setVideoDims({ width: result.width, height: result.height });
       setIsProcessing(false);
       
-      // Auto-switch to view mode if possible
       setTimeout(() => {
         if (permissionGranted || !window.DeviceOrientationEvent) {
           setViewMode(true);
@@ -461,22 +487,22 @@ const App = () => {
     }
   };
 
-  // --- Render ---
-
-  // 1. Full Screen Viewer (Three.js)
-  if (viewMode && frames.length > 0) {
-    return <LenticularViewer frames={frames} onClose={() => setViewMode(false)} />;
+  if (viewMode && frames.length > 0 && videoDims) {
+    return (
+      <LenticularViewer 
+        frames={frames} 
+        width={videoDims.width}
+        height={videoDims.height}
+        onClose={() => setViewMode(false)} 
+      />
+    );
   }
 
-  // 2. Dashboard / Upload
   return (
     <div className="min-h-screen bg-black text-white flex flex-col relative p-6 font-sans">
-      
-      {/* Background Decorative Lines */}
       <div className="fixed inset-0 pointer-events-none border-[1px] border-white/10 m-4 rounded-sm z-0" />
       <div className="fixed top-20 bottom-32 left-6 right-6 pointer-events-none border-x border-white/5 z-0" />
 
-      {/* Header Section */}
       <header className="relative z-10 pt-8 pb-6">
         <div className="flex justify-between items-baseline mb-8">
             <h1 className="text-4xl md:text-5xl font-mono font-bold tracking-tighter text-white">
@@ -498,22 +524,17 @@ const App = () => {
         </div>
       </header>
 
-      {/* Main Visual / Interaction Area */}
       <main className="flex-1 relative flex flex-col justify-center z-10 min-h-[400px]">
-        
-        {/* Center Box Decoration */}
         <div className="absolute top-0 right-0 w-4 h-4 border-t border-r border-white/40" />
         <div className="absolute top-0 left-0 w-4 h-4 border-t border-l border-white/40" />
         <div className="absolute bottom-0 right-0 w-4 h-4 border-b border-r border-white/40" />
         <div className="absolute bottom-0 left-0 w-4 h-4 border-b border-l border-white/40" />
         
-        {/* Connector Lines */}
         <div className="absolute top-[50%] left-0 w-4 h-px bg-white/30" />
         <div className="absolute top-[50%] right-0 w-4 h-px bg-white/30" />
         <div className="absolute top-0 left-[50%] w-px h-4 bg-white/30" />
         <div className="absolute bottom-0 left-[50%] w-px h-4 bg-white/30" />
 
-        {/* Content */}
         <div className="w-full h-full flex flex-col items-center justify-center bg-white/5 border border-white/5 relative overflow-hidden backdrop-blur-sm">
              <div className="scanline" />
              
@@ -549,16 +570,13 @@ const App = () => {
         </div>
       </main>
 
-      {/* Footer / Navigation Bar */}
       <footer className="relative z-10 pt-6 pb-4">
         <div className="flex flex-col gap-4">
-            
             <div className="flex justify-between items-center text-[10px] font-mono text-white/30 px-2">
                 <span>V.2.04</span>
                 <span>COPYRIGHT_2025</span>
             </div>
 
-            {/* Main Action Button */}
             {frames.length > 0 && !isProcessing ? (
                !permissionGranted && typeof (DeviceOrientationEvent as any)?.requestPermission === 'function' ? (
                   <button 
