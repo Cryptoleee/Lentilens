@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 
 // --- Types ---
@@ -210,6 +210,40 @@ const App = () => {
     }
   };
 
+  // --- Moiré / Lenticular Pattern Generator ---
+  
+  const lenticularSvg = useMemo(() => {
+    // We generate an SVG that mimics the barrel-distorted line pattern
+    // from the reference image.
+    const numLines = 80;
+    const paths = [];
+    
+    for (let i = 0; i <= numLines; i++) {
+        // Map i to percentage 0-100
+        const x = (i / numLines) * 100;
+        
+        // Distortion factor: 0 at 50, increases towards edges
+        // This makes lines bow outwards
+        const centerOffset = x - 50;
+        // The control point pulls the curve. 
+        // If x < 50, we want to curve LEFT (smaller X).
+        // If x > 50, we want to curve RIGHT (larger X).
+        const curvature = (Math.pow(Math.abs(centerOffset) / 50, 1.5)) * 15;
+        const cpX = x + (centerOffset > 0 ? curvature : -curvature);
+        
+        // Alternating stroke opacity/width to create interference depth
+        const opacity = 0.5;
+        
+        paths.push(
+            `<path d="M ${x} -10 Q ${cpX} 50 ${x} 110" stroke="black" stroke-width="0.6" fill="none" opacity="${opacity}" />`
+        );
+    }
+
+    const svgString = `<svg viewBox="0 0 100 100" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">${paths.join('')}</svg>`;
+    return `data:image/svg+xml;base64,${btoa(svgString)}`;
+  }, []);
+
+
   // --- Effects ---
 
   useEffect(() => {
@@ -257,18 +291,22 @@ const App = () => {
                     <span className="text-[10px] font-mono text-white/50 border-l-2 border-white/50 pl-2">PLAYBACK_MODE</span>
                     <span className="text-[10px] font-mono text-emerald-500 animate-pulse pl-2.5">● LIVE FEED</span>
                 </div>
+                {/* Close Button - Now more prominent and easier to tap */}
                 <button 
                   onClick={() => setViewMode(false)}
-                  className="pointer-events-auto text-white/60 hover:text-white font-mono text-xs border border-white/20 px-3 py-1 bg-black/50 backdrop-blur-sm transition-colors"
+                  className="pointer-events-auto text-white/80 hover:text-white font-mono text-lg font-bold p-4 -mt-4 -mr-4 flex items-center justify-center"
+                  aria-label="Close"
                 >
-                  [ CLOSE_LINK ]
+                  <span className="border border-white/20 w-8 h-8 flex items-center justify-center bg-black/50 backdrop-blur-md rounded-full">
+                    ✕
+                  </span>
                 </button>
             </div>
             
             <div className="flex justify-between items-end">
                  <div className="font-mono text-[10px] text-white/30">
-                    G-SENSOR: ACTIVE<br/>
-                    LENS_REFRACTION: 1.54
+                    OPTICAL_MATRIX<br/>
+                    DISTORTION: 12%
                  </div>
                  {/* Tilt Indicator Visualization */}
                  <div className="w-32 h-1 bg-white/10 relative overflow-hidden">
@@ -286,53 +324,49 @@ const App = () => {
 
         {/* The Image Container */}
         <div className="relative w-full h-full flex items-center justify-center bg-[#050505]">
+          {/* Base Video Frame */}
           <img 
             src={frames[currentFrameIndex]} 
-            className="absolute w-full h-full object-cover transition-opacity duration-75"
+            className="absolute w-full h-full object-cover transition-opacity duration-75 scale-105"
             alt="Lenticular frame"
+            style={{ 
+                // Slight translation opposite to tilt can enhance depth
+                transform: `translateX(${(currentFrameIndex / frames.length - 0.5) * -20}px) scale(1.05)`
+            }}
           />
           
-          {/* LAYER 1: Lenticular Ridges (The physical texture) */}
+          {/* LAYER 1: The Reference Optical Pattern (Barrel Distortion SVG) */}
           <div 
-            className="absolute inset-0 pointer-events-none z-10 opacity-30 mix-blend-hard-light"
+            className="absolute inset-0 pointer-events-none z-20 mix-blend-hard-light"
             style={{
-              backgroundImage: `repeating-linear-gradient(90deg, 
-                rgba(255,255,255,0.1) 0px, 
-                rgba(255,255,255,0) 1px, 
-                rgba(0,0,0,0.3) 2px, 
-                rgba(0,0,0,0.8) 3px,
-                rgba(0,0,0,0.3) 4px
-              )`
+              backgroundImage: `url("${lenticularSvg}")`,
+              backgroundSize: '100% 100%',
+              opacity: 0.8
             }}
           />
 
-          {/* LAYER 2: Specular Highlight (The Gloss) */}
+          {/* LAYER 2: Fine Grain Interference (High frequency noise) */}
           <div 
-            className="absolute inset-0 pointer-events-none z-20 opacity-40 mix-blend-screen"
+            className="absolute inset-0 pointer-events-none z-10 opacity-40 mix-blend-overlay"
             style={{
-              background: `linear-gradient(115deg, 
-                transparent 30%, 
-                rgba(255,255,255,0.05) 40%, 
-                rgba(255,255,255,0.3) 45%, 
-                rgba(255,255,255,0.05) 50%, 
-                transparent 60%
-              )`
+              backgroundImage: `repeating-linear-gradient(90deg, transparent 0, transparent 1px, #000 1px, #000 2px)`
             }}
           />
 
-           {/* LAYER 3: Deep Vignette (Depth) */}
+           {/* LAYER 3: Vignette & Gloss */}
            <div 
-            className="absolute inset-0 pointer-events-none z-30 opacity-70 mix-blend-multiply"
+            className="absolute inset-0 pointer-events-none z-30 opacity-80 mix-blend-multiply"
             style={{
-              background: `radial-gradient(circle at 50% 50%, transparent 20%, #000 120%)`
+              background: `radial-gradient(circle at 50% 50%, transparent 30%, #000 120%)`
             }}
           />
           
-          {/* LAYER 4: Subtle Noise (Tactile feel) */}
-          <div className="absolute inset-0 pointer-events-none z-40 opacity-[0.03] mix-blend-overlay"
-             style={{
-                 backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E")`
-             }}
+          {/* LAYER 4: Surface Reflection */}
+          <div 
+            className="absolute inset-0 pointer-events-none z-40 opacity-30 mix-blend-screen"
+            style={{
+              background: `linear-gradient(135deg, transparent 40%, rgba(255,255,255,0.1) 50%, transparent 60%)`
+            }}
           />
         </div>
       </div>
