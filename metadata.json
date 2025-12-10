@@ -1,0 +1,5 @@
+{
+  "name": "Lenticular Lens",
+  "description": "Turn short clips into interactive lenticular cards controlled by phone tilt.",
+  "requestFramePermissions": []
+}
