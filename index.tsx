@@ -255,11 +255,11 @@ const App = () => {
             <div className="flex justify-between items-start">
                 <div className="flex flex-col gap-1">
                     <span className="text-[10px] font-mono text-white/50 border-l-2 border-white/50 pl-2">PLAYBACK_MODE</span>
-                    <span className="text-[10px] font-mono text-red-500 animate-pulse pl-2.5">● LIVE FEED</span>
+                    <span className="text-[10px] font-mono text-emerald-500 animate-pulse pl-2.5">● LIVE FEED</span>
                 </div>
                 <button 
                   onClick={() => setViewMode(false)}
-                  className="pointer-events-auto text-white/60 hover:text-white font-mono text-xs border border-white/20 px-3 py-1 bg-black/50 backdrop-blur-sm"
+                  className="pointer-events-auto text-white/60 hover:text-white font-mono text-xs border border-white/20 px-3 py-1 bg-black/50 backdrop-blur-sm transition-colors"
                 >
                   [ CLOSE_LINK ]
                 </button>
@@ -268,12 +268,16 @@ const App = () => {
             <div className="flex justify-between items-end">
                  <div className="font-mono text-[10px] text-white/30">
                     G-SENSOR: ACTIVE<br/>
-                    MOIRE: 100%
+                    LENS_REFRACTION: 1.54
                  </div>
                  {/* Tilt Indicator Visualization */}
-                 <div className="w-32 h-1 bg-white/20 relative">
+                 <div className="w-32 h-1 bg-white/10 relative overflow-hidden">
                     <div 
-                        className="absolute top-0 bottom-0 w-1 bg-white transition-all duration-75"
+                        className="absolute top-0 bottom-0 w-full bg-gradient-to-r from-transparent via-white/40 to-transparent transform transition-transform duration-75"
+                        style={{ transform: `translateX(${(currentFrameIndex / frames.length) * 100 - 50}%)` }}
+                    />
+                    <div 
+                        className="absolute top-0 bottom-0 w-0.5 bg-white transition-all duration-75"
                         style={{ left: `${(currentFrameIndex / frames.length) * 100}%` }}
                     />
                  </div>
@@ -281,28 +285,54 @@ const App = () => {
         </div>
 
         {/* The Image Container */}
-        <div className="relative w-full h-full flex items-center justify-center">
+        <div className="relative w-full h-full flex items-center justify-center bg-[#050505]">
           <img 
             src={frames[currentFrameIndex]} 
-            className="absolute w-full h-full object-cover"
+            className="absolute w-full h-full object-cover transition-opacity duration-75"
             alt="Lenticular frame"
-            style={{ 
-              imageRendering: 'pixelated' 
+          />
+          
+          {/* LAYER 1: Lenticular Ridges (The physical texture) */}
+          <div 
+            className="absolute inset-0 pointer-events-none z-10 opacity-30 mix-blend-hard-light"
+            style={{
+              backgroundImage: `repeating-linear-gradient(90deg, 
+                rgba(255,255,255,0.1) 0px, 
+                rgba(255,255,255,0) 1px, 
+                rgba(0,0,0,0.3) 2px, 
+                rgba(0,0,0,0.8) 3px,
+                rgba(0,0,0,0.3) 4px
+              )`
+            }}
+          />
+
+          {/* LAYER 2: Specular Highlight (The Gloss) */}
+          <div 
+            className="absolute inset-0 pointer-events-none z-20 opacity-40 mix-blend-screen"
+            style={{
+              background: `linear-gradient(115deg, 
+                transparent 30%, 
+                rgba(255,255,255,0.05) 40%, 
+                rgba(255,255,255,0.3) 45%, 
+                rgba(255,255,255,0.05) 50%, 
+                transparent 60%
+              )`
+            }}
+          />
+
+           {/* LAYER 3: Deep Vignette (Depth) */}
+           <div 
+            className="absolute inset-0 pointer-events-none z-30 opacity-70 mix-blend-multiply"
+            style={{
+              background: `radial-gradient(circle at 50% 50%, transparent 20%, #000 120%)`
             }}
           />
           
-          <div 
-            className="absolute inset-0 pointer-events-none z-10 opacity-40 mix-blend-overlay"
-            style={{
-              backgroundImage: `repeating-linear-gradient(90deg, transparent 0px, transparent 1px, #000 1px, #000 3px)`
-            }}
-          />
-           <div 
-            className="absolute inset-0 pointer-events-none z-10 opacity-20 mix-blend-hard-light"
-            style={{
-              backgroundSize: '4px 4px',
-              backgroundImage: `radial-gradient(circle, transparent 20%, #000 90%)`
-            }}
+          {/* LAYER 4: Subtle Noise (Tactile feel) */}
+          <div className="absolute inset-0 pointer-events-none z-40 opacity-[0.03] mix-blend-overlay"
+             style={{
+                 backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E")`
+             }}
           />
         </div>
       </div>
