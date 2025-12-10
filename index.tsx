@@ -138,19 +138,21 @@ uniform vec2 uImageResolution;
 
 varying vec2 vUv;
 
-// "Contain" UV calculation (Fit image inside screen)
-vec2 getContainUV(vec2 uv, vec2 resolution, vec2 texResolution) {
+// "Cover" UV calculation (Fill screen with image)
+vec2 getCoverUV(vec2 uv, vec2 resolution, vec2 texResolution) {
     float sAspect = resolution.x / resolution.y;
     float tAspect = texResolution.x / texResolution.y;
     
     vec2 scale = vec2(1.0);
     
     if (sAspect > tAspect) {
-        // Screen is wider: We match Height, scale X (Zoom out to show bars on sides)
-        scale.x = sAspect / tAspect;
-    } else {
-        // Screen is taller: We match Width, scale Y (Zoom out to show bars on top/bottom)
+        // Screen is wider than image: Fit Width, Crop Height
+        // Scale Y by (tAspect / sAspect) to maintain aspect ratio
         scale.y = tAspect / sAspect;
+    } else {
+        // Screen is taller than image: Fit Height, Crop Width
+        // Scale X by (sAspect / tAspect)
+        scale.x = sAspect / tAspect;
     }
     
     return (uv - 0.5) * scale + 0.5;
@@ -159,47 +161,34 @@ vec2 getContainUV(vec2 uv, vec2 resolution, vec2 texResolution) {
 void main() {
   vec2 uv = vUv;
   
-  // 1. Aspect Ratio Correction (Contain Mode)
-  vec2 contentUV = getContainUV(uv, uResolution, uImageResolution);
+  // 1. Aspect Ratio Correction (Cover Mode)
+  vec2 contentUV = getCoverUV(uv, uResolution, uImageResolution);
   
   // 2. Sliced Prism Effect
-  // UPDATED: ridgeWidth set to 10.0
   float ridgeWidth = 10.0; 
   float totalRidges = uResolution.x / ridgeWidth;
   
   float ridgePos = uv.x * totalRidges;
-  // float ridgeIndex = floor(ridgePos);
   float localX = fract(ridgePos); // 0.0 to 1.0 inside ridge
   
-  // Sawtooth Normal (Prism shape)
-  // Map 0..1 to -1..1
+  // Sawtooth Normal
   float sawtooth = localX * 2.0 - 1.0;
-  
-  // Sharp faceted normal
   vec3 normal = normalize(vec3(sawtooth * 1.5, 0.0, 1.0));
   
   // 3. Refraction
   float ior = 0.06; 
   vec2 refraction = normal.xy * ior;
-  
-  // Add tilt influence to refraction (parallax)
   refraction.x -= uTilt * 0.12;
   
   vec2 finalUV = contentUV + refraction;
   
-  // 4. Chromatic Aberration (Prism Split)
+  // 4. Chromatic Aberration
   float abbStrength = 0.008 * (0.5 + 0.5 * abs(sawtooth));
   
-  // Sample with mask for 0-1 bounds (avoid edge streaking)
-  vec3 texColor = vec3(0.0);
-  
-  // Check bounds
-  if (finalUV.x >= 0.0 && finalUV.x <= 1.0 && finalUV.y >= 0.0 && finalUV.y <= 1.0) {
-      float r = texture2D(uTexture, finalUV + vec2(abbStrength, 0.0)).r;
-      float g = texture2D(uTexture, finalUV).g;
-      float b = texture2D(uTexture, finalUV - vec2(abbStrength, 0.0)).b;
-      texColor = vec3(r, g, b);
-  }
+  // Clamp edges to prevent texture wrapping artifacts at the borders
+  float r = texture2D(uTexture, clamp(finalUV + vec2(abbStrength, 0.0), 0.0, 1.0)).r;
+  float g = texture2D(uTexture, clamp(finalUV, 0.0, 1.0)).g;
+  float b = texture2D(uTexture, clamp(finalUV - vec2(abbStrength, 0.0), 0.0, 1.0)).b;
   
   // 5. Specular Highlights
   vec3 lightDir = normalize(vec3(-uTilt * 2.0, 0.5, 1.0));
@@ -213,21 +202,13 @@ void main() {
   float edgeDarkness = smoothstep(0.0, 0.1, localX) * smoothstep(1.0, 0.9, localX);
   edgeDarkness = 0.5 + 0.5 * edgeDarkness; 
   
-  vec3 finalColor = texColor;
-  
-  // Only apply lighting if we have content, OR apply lighting everywhere?
-  // Usually for a "card" look, lighting should be on the card.
-  // We can create a card mask based on contentUV (ignoring refraction for the shape)
-  // to give it a physical presence even if black.
-  // But let's keep it simple: lighting applies to the image content.
-  
-  float contentMask = step(0.0, finalUV.x) * step(finalUV.x, 1.0) * step(0.0, finalUV.y) * step(finalUV.y, 1.0);
+  vec3 finalColor = vec3(r, g, b);
 
   finalColor *= edgeDarkness; 
-  finalColor += vec3(1.0) * specular * 0.5 * contentMask; 
-  finalColor += vec3(0.8, 0.9, 1.0) * stripLight * 0.4 * contentMask; 
+  finalColor += vec3(1.0) * specular * 0.5; 
+  finalColor += vec3(0.8, 0.9, 1.0) * stripLight * 0.4; 
   
-  // Vignette for the whole screen
+  // Vignette
   float dist = length(vUv - 0.5);
   finalColor *= 1.0 - smoothstep(0.6, 1.4, dist);
 
