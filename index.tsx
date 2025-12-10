@@ -48,11 +48,11 @@ const extractFrames = async (
     };
 
     video.onloadedmetadata = () => {
-      // Calculate scaled dimensions to avoid massive texture memory usage
       const maxDim = 1024;
       let width = video.videoWidth;
       let height = video.videoHeight;
       
+      // Scale down if too large, maintaining aspect ratio
       if (width > maxDim || height > maxDim) {
         if (width > height) {
           height = (height / width) * maxDim;
@@ -89,10 +89,12 @@ const extractFrames = async (
             video.addEventListener("seeked", onSeeked);
           });
           
+          // Clear and draw to ensure no artifacts
+          ctx.clearRect(0,0, canvas.width, canvas.height);
           ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
           
           const blob = await new Promise<Blob | null>((blobResolve) => 
-            canvas.toBlob(blobResolve, "image/jpeg", 0.8)
+            canvas.toBlob(blobResolve, "image/jpeg", 0.9)
           );
           
           if (blob) {
@@ -136,26 +138,24 @@ uniform vec2 uImageResolution;
 
 varying vec2 vUv;
 
-// Function to compute correct UVs for "background-size: cover"
-// Preserves aspect ratio and centers the image
+// Robust "Cover" UV calculation
 vec2 getCoverUV(vec2 uv, vec2 resolution, vec2 texResolution) {
-    float screenAspect = resolution.x / resolution.y;
-    float texAspect = texResolution.x / texResolution.y;
+    float sAspect = resolution.x / resolution.y;
+    float tAspect = texResolution.x / texResolution.y;
     
+    // Calculate scale needed to cover the screen
     vec2 scale = vec2(1.0);
     
-    // Correct logic for "Cover":
-    // If Screen is wider (Aspect >), we match width and crop height.
-    // To crop height, we need to map 0..1 ScreenY to a smaller range of TextureY.
-    // So scale factor must be < 1.0.
-    
-    if (screenAspect > texAspect) {
-        scale.y = texAspect / screenAspect; 
+    if (sAspect > tAspect) {
+        // Screen is wider than texture: Fit Width, Crop Height
+        // The texture must be "zoomed in" vertically
+        scale.y = tAspect / sAspect;
     } else {
-        scale.x = screenAspect / texAspect;
+        // Screen is taller than texture: Fit Height, Crop Width
+        // The texture must be "zoomed in" horizontally
+        scale.x = sAspect / tAspect;
     }
     
-    // Scale from center
     return (uv - 0.5) * scale + 0.5;
 }
 
@@ -165,78 +165,69 @@ void main() {
   // 1. Aspect Ratio Correction (Cover Mode)
   vec2 coverUV = getCoverUV(uv, uResolution, uImageResolution);
   
-  // Safety clamp to avoid streak artifacts if precision drifts
-  coverUV = clamp(coverUV, 0.001, 0.999);
-
-  // 2. Physical Lenticular Geometry
-  // Simulation of vertical cylinder array
-  float density = 60.0; 
-  // Add aspect ratio compensation to density so ridges are square
-  float ridges = uv.x * density * (uResolution.x / uResolution.y);
+  // 2. Sliced Prism Effect
+  // Use constant pixel width for ridges regardless of resolution
+  float ridgeWidth = 6.0; // Pixels
+  float totalRidges = uResolution.x / ridgeWidth;
   
-  // Local X (-1.0 to 1.0) within a single lens
-  float localX = fract(ridges) * 2.0 - 1.0;
+  float ridgePos = uv.x * totalRidges;
+  float ridgeIndex = floor(ridgePos);
+  float localX = fract(ridgePos); // 0.0 to 1.0 inside ridge
   
-  // Calculate Cylinder Normal
-  // A perfect semi-cylinder profile: z = sqrt(1 - x^2)
-  float localZ = sqrt(max(0.0, 1.0 - localX * localX));
-  vec3 normal = normalize(vec3(localX, 0.0, localZ));
+  // Sawtooth Normal (Prism shape)
+  // Normal points left-ish then snaps back
+  // Map 0..1 to -1..1
+  float sawtooth = localX * 2.0 - 1.0;
   
-  // 3. Refraction (The "Deep Glass" look)
-  // We offset the texture lookup based on the normal XY
-  float ior = 0.04; // Refraction strength
+  // Sharp faceted normal
+  vec3 normal = normalize(vec3(sawtooth * 1.5, 0.0, 1.0));
+  
+  // 3. Refraction
+  // Stronger refraction for "thick glass" look
+  float ior = 0.06; 
   vec2 refraction = normal.xy * ior;
   
-  // Parallax: The view angle (uTilt) also shifts what we see
-  refraction.x -= uTilt * 0.08;
+  // Add tilt influence to refraction (parallax)
+  refraction.x -= uTilt * 0.12;
   
   vec2 finalUV = coverUV + refraction;
-
-  // 4. Chromatic Aberration
-  // Split RGB slightly based on lens edge power
-  float abb = 0.004 * abs(localX);
-  float r = texture2D(uTexture, finalUV + vec2(abb, 0.0)).r;
+  
+  // 4. Chromatic Aberration (Prism Split)
+  // Stronger at the edges of the prism
+  float abbStrength = 0.008 * (0.5 + 0.5 * abs(sawtooth));
+  
+  float r = texture2D(uTexture, finalUV + vec2(abbStrength, 0.0)).r;
   float g = texture2D(uTexture, finalUV).g;
-  float b = texture2D(uTexture, finalUV - vec2(abb, 0.0)).b;
-  vec3 texColor = vec3(r, g, b);
+  float b = texture2D(uTexture, finalUV - vec2(abbStrength, 0.0)).b;
+  
+  // 5. Specular Highlights
+  // Simulating a glossy plastic surface
+  // Main light source
+  vec3 lightDir = normalize(vec3(-uTilt * 2.0, 0.5, 1.0));
+  float specular = pow(max(0.0, dot(normal, lightDir)), 32.0);
+  
+  // Anisotropic / Strip light reflection (The "sheen" across the card)
+  // This creates the moving band of light
+  float viewAngle = uTilt * 3.0; // -3 to 3
+  // Match normal.x to view angle
+  float reflectionBand = 1.0 - smoothstep(0.0, 0.3, abs(normal.x - clamp(viewAngle, -1.0, 1.0)));
+  float stripLight = pow(reflectionBand, 8.0);
 
-  // 5. Studio Lighting (Reflection)
-  // Create a sharp, glossy reflection that moves with tilt
-  // Light moves opposite to tilt
-  vec3 lightDir = normalize(vec3(uTilt * -1.5, 0.2, 0.8));
-  vec3 viewDir = vec3(0.0, 0.0, 1.0);
-  vec3 halfVector = normalize(lightDir + viewDir);
+  // 6. Edge/Ridge Darkening (Ambient Occlusion)
+  // Darken the boundaries between prisms
+  float edgeDarkness = smoothstep(0.0, 0.1, localX) * smoothstep(1.0, 0.9, localX);
+  edgeDarkness = 0.5 + 0.5 * edgeDarkness; // Map to 0.5..1.0
   
-  // Blinn-Phong Specular
-  float NdotH = max(0.0, dot(normal, halfVector));
-  float specular = pow(NdotH, 40.0); // High sharpness for plastic/glass look
+  vec3 finalColor = vec3(r, g, b);
   
-  // Anisotropic Strip Light (like a studio softbox reflecting)
-  // We stretch the highlight vertically
-  float stripSpec = pow(max(0.0, dot(normal, normalize(vec3(uTilt * -1.5, 0.0, 0.5)))), 20.0);
+  // Apply visual effects
+  finalColor *= edgeDarkness; // Darken edges
+  finalColor += vec3(1.0) * specular * 0.5; // Sharp highlight
+  finalColor += vec3(0.8, 0.9, 1.0) * stripLight * 0.4; // Soft sheen
   
-  // Fresnel (Edge Glow)
-  // Glass looks brighter/more reflective at glancing angles (edges of the cylinder)
-  float fresnel = pow(1.0 - normal.z, 3.0);
-  
-  // 6. Occlusion
-  // Darken the deep valleys between lenses
-  float occlusion = smoothstep(-1.0, -0.5, -abs(localX));
-  
-  // 7. Composite
-  vec3 finalColor = texColor;
-  
-  // Apply occlusion to base texture
-  finalColor *= (0.7 + 0.3 * occlusion);
-  
-  // Add lighting
-  finalColor += vec3(1.0) * specular * 0.6; // Sharp point highlight
-  finalColor += vec3(0.9, 0.95, 1.0) * stripSpec * 0.4; // Soft strip reflection
-  finalColor += vec3(1.0) * fresnel * 0.2; // Edge glow
-
   // Vignette
-  float vig = 1.0 - smoothstep(0.5, 1.4, length(vUv - 0.5));
-  finalColor *= vig;
+  float dist = length(vUv - 0.5);
+  finalColor *= 1.0 - smoothstep(0.6, 1.4, dist);
 
   gl_FragColor = vec4(finalColor, 1.0);
 }
@@ -290,16 +281,24 @@ const LenticularViewer = ({
 
     const scene = new THREE.Scene();
     const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    const renderer = new THREE.WebGLRenderer({ 
+      antialias: false, // Turn off MSAA for sharper pixel look
+      alpha: false,
+      powerPreference: "high-performance"
+    });
     
     const updateSize = () => {
       if (!containerRef.current) return;
+      // Use device pixel ratio for sharp lines
+      const dpr = Math.min(window.devicePixelRatio, 2.0); 
       const { clientWidth, clientHeight } = containerRef.current;
+      
       renderer.setSize(clientWidth, clientHeight);
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setPixelRatio(dpr);
       
       if (materialRef.current) {
-        materialRef.current.uniforms.uResolution.value.set(clientWidth, clientHeight);
+        // Pass physical pixels for consistent ridge width
+        materialRef.current.uniforms.uResolution.value.set(clientWidth * dpr, clientHeight * dpr);
       }
     };
     
@@ -330,22 +329,25 @@ const LenticularViewer = ({
          return;
       }
 
-      const t = tiltRef.current; // -1 to 1
-      const normTilt = (t + 1) / 2; 
-      const frameIndex = Math.min(
-        texturesRef.current.length - 1,
-        Math.max(0, Math.floor(normTilt * texturesRef.current.length))
-      );
-      
-      const currentTexture = texturesRef.current[frameIndex];
+      // Smooth tilt logic
+      // Target
+      const targetTilt = tiltRef.current;
       
       if (materialRef.current) {
-        materialRef.current.uniforms.uTexture.value = currentTexture;
+        // Current uniform value
+        const currentTilt = materialRef.current.uniforms.uTilt.value;
+        // Lerp
+        const newTilt = currentTilt + (targetTilt - currentTilt) * 0.1;
+        materialRef.current.uniforms.uTilt.value = newTilt;
+
+        // Select frame based on smoothed tilt for fluid animation
+        const normTilt = (newTilt + 1) / 2; 
+        const frameIndex = Math.min(
+          texturesRef.current.length - 1,
+          Math.max(0, Math.floor(normTilt * texturesRef.current.length))
+        );
         
-        // Interpolate tilt for smooth lighting
-        const currentTiltUniform = materialRef.current.uniforms.uTilt.value;
-        const lerpFactor = 0.15;
-        materialRef.current.uniforms.uTilt.value += (t - currentTiltUniform) * lerpFactor;
+        materialRef.current.uniforms.uTexture.value = texturesRef.current[frameIndex];
       }
 
       renderer.render(scene, camera);
@@ -369,7 +371,7 @@ const LenticularViewer = ({
   useEffect(() => {
     const handleOrientation = (e: DeviceOrientationEvent) => {
       const gamma = e.gamma || 0; 
-      const maxTilt = 40; 
+      const maxTilt = 45; 
       let val = Math.max(-maxTilt, Math.min(maxTilt, gamma));
       tiltRef.current = val / maxTilt;
     };
@@ -393,14 +395,19 @@ const LenticularViewer = ({
       <div ref={containerRef} className="w-full h-full" />
       <button 
         onClick={onClose}
-        className="absolute top-8 right-8 z-50 w-12 h-12 flex items-center justify-center bg-black/20 backdrop-blur-md rounded-full border border-white/10 hover:bg-white/20 transition-all cursor-pointer"
+        className="absolute top-6 right-6 z-50 w-12 h-12 flex items-center justify-center bg-black/40 backdrop-blur-md rounded-full border border-white/20 hover:bg-white/20 transition-all cursor-pointer shadow-lg"
         aria-label="Close"
       >
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <line x1="18" y1="6" x2="6" y2="18"></line>
             <line x1="6" y1="6" x2="18" y2="18"></line>
         </svg>
       </button>
+      
+      {/* Optional hint overlay */}
+      <div className="absolute bottom-10 left-0 w-full text-center pointer-events-none opacity-40 mix-blend-difference text-white font-mono text-xs tracking-widest">
+        TILT DEVICE
+      </div>
     </div>
   );
 };
