@@ -11,10 +11,12 @@ interface FrameData {
 
 /**
  * Extract frames from a video file.
+ * Attaches video to DOM temporarily to ensure mobile browsers render frames correctly.
  */
 const extractFrames = async (
   videoFile: File,
-  frameCount: number = 30
+  frameCount: number = 30,
+  onProgress?: (percent: number) => void
 ): Promise<string[]> => {
   return new Promise((resolve, reject) => {
     const video = document.createElement("video");
@@ -26,60 +28,95 @@ const extractFrames = async (
       return;
     }
 
+    // Mobile browsers require video to be in DOM and inline to seek properly
+    video.style.position = 'fixed';
+    video.style.top = '0';
+    video.style.left = '0';
+    video.style.width = '1px';
+    video.style.height = '1px';
+    video.style.opacity = '0';
+    video.style.pointerEvents = 'none';
+    video.setAttribute('playsinline', 'true');
+    video.setAttribute('webkit-playsinline', 'true');
+    video.muted = true;
+    
+    document.body.appendChild(video);
+
     const fileUrl = URL.createObjectURL(videoFile);
     video.src = fileUrl;
-    video.muted = true;
-    video.playsInline = true;
-    video.crossOrigin = "anonymous";
-
-    const frames: string[] = [];
     
+    const cleanup = () => {
+      if (document.body.contains(video)) {
+        document.body.removeChild(video);
+      }
+      URL.revokeObjectURL(fileUrl);
+    };
+
+    video.onerror = (e) => {
+      cleanup();
+      reject("Video format not supported or load error.");
+    };
+
     video.onloadedmetadata = () => {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
     };
 
     video.onloadeddata = async () => {
-      const duration = video.duration;
-      const safeDuration = Number.isFinite(duration) ? duration : 3; 
-      const interval = safeDuration / frameCount;
+      // Use duration, but cap at 5 seconds to prevent huge processing times
+      const duration = video.duration || 0;
+      const safeDuration = (Number.isFinite(duration) && duration > 0) ? duration : 3;
+      const processDuration = Math.min(safeDuration, 5); 
+      const interval = processDuration / frameCount;
+      const frames: string[] = [];
       
       try {
         for (let i = 0; i < frameCount; i++) {
           const time = i * interval;
           video.currentTime = time;
           
+          // Wait for seek to complete with a safety timeout
           await new Promise<void>((seekResolve) => {
+            const timeoutId = setTimeout(() => {
+               // If seek takes too long, just proceed (might duplicate frame, better than hanging)
+               seekResolve();
+            }, 500);
+
             const onSeeked = () => {
+              clearTimeout(timeoutId);
               video.removeEventListener("seeked", onSeeked);
               seekResolve();
             };
             video.addEventListener("seeked", onSeeked);
           });
           
+          // Draw to canvas
           ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
           
+          // Convert to blob
           const blob = await new Promise<Blob | null>((blobResolve) => 
-            canvas.toBlob(blobResolve, "image/jpeg", 0.8)
+            canvas.toBlob(blobResolve, "image/jpeg", 0.7)
           );
           
           if (blob) {
             frames.push(URL.createObjectURL(blob));
           }
+
+          if (onProgress) {
+            onProgress(Math.round(((i + 1) / frameCount) * 100));
+          }
         }
         
-        URL.revokeObjectURL(fileUrl);
+        cleanup();
         resolve(frames);
       } catch (err) {
-        URL.revokeObjectURL(fileUrl);
+        cleanup();
         reject(err);
       }
     };
-
-    video.onerror = (e) => {
-      URL.revokeObjectURL(fileUrl);
-      reject(e);
-    };
+    
+    // Trigger load
+    video.load();
   });
 };
 
@@ -127,28 +164,28 @@ const App = () => {
     if (!file) return;
 
     setIsProcessing(true);
-    setProgress(10);
+    setProgress(0);
+    setFrames([]);
 
     try {
-      const timer = setInterval(() => {
-        setProgress((p) => Math.min(p + 5, 90));
-      }, 200);
-
-      const extracted = await extractFrames(file, 45); 
+      // Pass the progress updater directly to the extractor
+      const extracted = await extractFrames(file, 45, (percent) => {
+        setProgress(percent);
+      });
       
-      clearInterval(timer);
-      setProgress(100);
+      setFrames(extracted);
+      setIsProcessing(false);
       
+      // Auto-switch to view mode if possible
       setTimeout(() => {
-        setFrames(extracted);
-        setIsProcessing(false);
         if (permissionGranted || !window.DeviceOrientationEvent) {
           setViewMode(true);
         }
       }, 500);
+
     } catch (err) {
       console.error(err);
-      alert("Failed to process video. Please try a different file.");
+      alert("Error processing video. Try a shorter clip or different format.");
       setIsProcessing(false);
       setProgress(0);
     }
