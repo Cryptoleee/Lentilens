@@ -138,22 +138,19 @@ uniform vec2 uImageResolution;
 
 varying vec2 vUv;
 
-// Robust "Cover" UV calculation
-vec2 getCoverUV(vec2 uv, vec2 resolution, vec2 texResolution) {
+// "Contain" UV calculation (Fit image inside screen)
+vec2 getContainUV(vec2 uv, vec2 resolution, vec2 texResolution) {
     float sAspect = resolution.x / resolution.y;
     float tAspect = texResolution.x / texResolution.y;
     
-    // Calculate scale needed to cover the screen
     vec2 scale = vec2(1.0);
     
     if (sAspect > tAspect) {
-        // Screen is wider than texture: Fit Width, Crop Height
-        // The texture must be "zoomed in" vertically
-        scale.y = tAspect / sAspect;
-    } else {
-        // Screen is taller than texture: Fit Height, Crop Width
-        // The texture must be "zoomed in" horizontally
+        // Screen is wider: We match Height, scale X (Zoom out to show bars on sides)
         scale.x = sAspect / tAspect;
+    } else {
+        // Screen is taller: We match Width, scale Y (Zoom out to show bars on top/bottom)
+        scale.y = tAspect / sAspect;
     }
     
     return (uv - 0.5) * scale + 0.5;
@@ -162,20 +159,19 @@ vec2 getCoverUV(vec2 uv, vec2 resolution, vec2 texResolution) {
 void main() {
   vec2 uv = vUv;
   
-  // 1. Aspect Ratio Correction (Cover Mode)
-  vec2 coverUV = getCoverUV(uv, uResolution, uImageResolution);
+  // 1. Aspect Ratio Correction (Contain Mode)
+  vec2 contentUV = getContainUV(uv, uResolution, uImageResolution);
   
   // 2. Sliced Prism Effect
-  // Use constant pixel width for ridges regardless of resolution
-  float ridgeWidth = 6.0; // Pixels
+  // UPDATED: ridgeWidth set to 10.0
+  float ridgeWidth = 10.0; 
   float totalRidges = uResolution.x / ridgeWidth;
   
   float ridgePos = uv.x * totalRidges;
-  float ridgeIndex = floor(ridgePos);
+  // float ridgeIndex = floor(ridgePos);
   float localX = fract(ridgePos); // 0.0 to 1.0 inside ridge
   
   // Sawtooth Normal (Prism shape)
-  // Normal points left-ish then snaps back
   // Map 0..1 to -1..1
   float sawtooth = localX * 2.0 - 1.0;
   
@@ -183,49 +179,55 @@ void main() {
   vec3 normal = normalize(vec3(sawtooth * 1.5, 0.0, 1.0));
   
   // 3. Refraction
-  // Stronger refraction for "thick glass" look
   float ior = 0.06; 
   vec2 refraction = normal.xy * ior;
   
   // Add tilt influence to refraction (parallax)
   refraction.x -= uTilt * 0.12;
   
-  vec2 finalUV = coverUV + refraction;
+  vec2 finalUV = contentUV + refraction;
   
   // 4. Chromatic Aberration (Prism Split)
-  // Stronger at the edges of the prism
   float abbStrength = 0.008 * (0.5 + 0.5 * abs(sawtooth));
   
-  float r = texture2D(uTexture, finalUV + vec2(abbStrength, 0.0)).r;
-  float g = texture2D(uTexture, finalUV).g;
-  float b = texture2D(uTexture, finalUV - vec2(abbStrength, 0.0)).b;
+  // Sample with mask for 0-1 bounds (avoid edge streaking)
+  vec3 texColor = vec3(0.0);
+  
+  // Check bounds
+  if (finalUV.x >= 0.0 && finalUV.x <= 1.0 && finalUV.y >= 0.0 && finalUV.y <= 1.0) {
+      float r = texture2D(uTexture, finalUV + vec2(abbStrength, 0.0)).r;
+      float g = texture2D(uTexture, finalUV).g;
+      float b = texture2D(uTexture, finalUV - vec2(abbStrength, 0.0)).b;
+      texColor = vec3(r, g, b);
+  }
   
   // 5. Specular Highlights
-  // Simulating a glossy plastic surface
-  // Main light source
   vec3 lightDir = normalize(vec3(-uTilt * 2.0, 0.5, 1.0));
   float specular = pow(max(0.0, dot(normal, lightDir)), 32.0);
   
-  // Anisotropic / Strip light reflection (The "sheen" across the card)
-  // This creates the moving band of light
-  float viewAngle = uTilt * 3.0; // -3 to 3
-  // Match normal.x to view angle
+  float viewAngle = uTilt * 3.0;
   float reflectionBand = 1.0 - smoothstep(0.0, 0.3, abs(normal.x - clamp(viewAngle, -1.0, 1.0)));
   float stripLight = pow(reflectionBand, 8.0);
 
-  // 6. Edge/Ridge Darkening (Ambient Occlusion)
-  // Darken the boundaries between prisms
+  // 6. Edge/Ridge Darkening
   float edgeDarkness = smoothstep(0.0, 0.1, localX) * smoothstep(1.0, 0.9, localX);
-  edgeDarkness = 0.5 + 0.5 * edgeDarkness; // Map to 0.5..1.0
+  edgeDarkness = 0.5 + 0.5 * edgeDarkness; 
   
-  vec3 finalColor = vec3(r, g, b);
+  vec3 finalColor = texColor;
   
-  // Apply visual effects
-  finalColor *= edgeDarkness; // Darken edges
-  finalColor += vec3(1.0) * specular * 0.5; // Sharp highlight
-  finalColor += vec3(0.8, 0.9, 1.0) * stripLight * 0.4; // Soft sheen
+  // Only apply lighting if we have content, OR apply lighting everywhere?
+  // Usually for a "card" look, lighting should be on the card.
+  // We can create a card mask based on contentUV (ignoring refraction for the shape)
+  // to give it a physical presence even if black.
+  // But let's keep it simple: lighting applies to the image content.
   
-  // Vignette
+  float contentMask = step(0.0, finalUV.x) * step(finalUV.x, 1.0) * step(0.0, finalUV.y) * step(finalUV.y, 1.0);
+
+  finalColor *= edgeDarkness; 
+  finalColor += vec3(1.0) * specular * 0.5 * contentMask; 
+  finalColor += vec3(0.8, 0.9, 1.0) * stripLight * 0.4 * contentMask; 
+  
+  // Vignette for the whole screen
   float dist = length(vUv - 0.5);
   finalColor *= 1.0 - smoothstep(0.6, 1.4, dist);
 
@@ -282,14 +284,13 @@ const LenticularViewer = ({
     const scene = new THREE.Scene();
     const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     const renderer = new THREE.WebGLRenderer({ 
-      antialias: false, // Turn off MSAA for sharper pixel look
+      antialias: false, 
       alpha: false,
       powerPreference: "high-performance"
     });
     
     const updateSize = () => {
       if (!containerRef.current) return;
-      // Use device pixel ratio for sharp lines
       const dpr = Math.min(window.devicePixelRatio, 2.0); 
       const { clientWidth, clientHeight } = containerRef.current;
       
@@ -297,7 +298,6 @@ const LenticularViewer = ({
       renderer.setPixelRatio(dpr);
       
       if (materialRef.current) {
-        // Pass physical pixels for consistent ridge width
         materialRef.current.uniforms.uResolution.value.set(clientWidth * dpr, clientHeight * dpr);
       }
     };
@@ -330,17 +330,13 @@ const LenticularViewer = ({
       }
 
       // Smooth tilt logic
-      // Target
       const targetTilt = tiltRef.current;
       
       if (materialRef.current) {
-        // Current uniform value
         const currentTilt = materialRef.current.uniforms.uTilt.value;
-        // Lerp
         const newTilt = currentTilt + (targetTilt - currentTilt) * 0.1;
         materialRef.current.uniforms.uTilt.value = newTilt;
 
-        // Select frame based on smoothed tilt for fluid animation
         const normTilt = (newTilt + 1) / 2; 
         const frameIndex = Math.min(
           texturesRef.current.length - 1,
